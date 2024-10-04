@@ -14,6 +14,7 @@ job_config = bigquery.LoadJobConfig(
     write_disposition=bigquery.WriteDisposition.WRITE_APPEND
 )
 warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning)
+warnings.filterwarnings('ignore', category=UserWarning)
 
 
 ##################################################################################################################################### 
@@ -24,7 +25,7 @@ warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning)
 #            CA (current address) + FA (former address) + F2 (former address2) = address                                            #
 #            AK (also known) + FN (former name) = name                                                                              #
 #            ES (employment status) + EF (former employment) + E2 (former employment2) = employment                                 #
-#            BP (bankruptcy) + CO (collection) = bankrputcy_collection                                                              #
+#            FB (foreign bureau) + FI (foreign bureau inquires) = foreign bureau                                                              #
 #     2. Equifax no longer provided the info on the following segments since 2008 (or even earlier) and                             #
 #        the earliest date of equifax_retail_credit_scoring is 2016-01-01:                                                          #
 #            OI, other income                                                                                                       #
@@ -1374,8 +1375,8 @@ if __name__ == '__main__':
     # Each time running this code, designate the year and the month of the data want to be retrieved
     # Steps:
     #     1. object instantiation with year and month
-    #     2. call fetch_date_from_google_bigquery()
-    #     3. call push_table_to_google_bigquery()
+    #     2. call fetch_data_from_google_bigquery()
+    #     3. call push_tables_to_google_bigquery()
     # Attention:
     #     Please set setting BigQuery's write_disposition to WRITE_APPEND.
     parser = FFFParser(begin_year=2024, begin_month=2)
