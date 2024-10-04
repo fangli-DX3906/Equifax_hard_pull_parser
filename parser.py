@@ -20,13 +20,12 @@ warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning)
 # This code parses the Equifax hard pull data into structured tables and push them to the Google BigQuery                           #
 # Created by Fang Li on Sept 28, 2024                                                                                               #
 # Notice:                                                                                                                           #
-#     1. the parsing segments part is created based on Lisa's code (FFF_practice.ipynb), A big thank you to her.                    #
-#     2. Given the structure of each tables, I combined the tables with same column together into one table. This involves:         #
+#     1. Given the structure of each tables, I combined the tables with same column together into one table. This involves:         #
 #            CA (current address) + FA (former address) + F2 (former address2) = address                                            #
 #            AK (also known) + FN (former name) = name                                                                              #
 #            ES (employment status) + EF (former employment) + E2 (former employment2) = employment                                 #
 #            BP (bankruptcy) + CO (collection) = bankrputcy_collection                                                              #
-#     3. Equifax no longer provided the info on the following segments since 2008 (or even earlier) and                             #
+#     2. Equifax no longer provided the info on the following segments since 2008 (or even earlier) and                             #
 #        the earliest date of equifax_retail_credit_scoring is 2016-01-01:                                                          #
 #            OI, other income                                                                                                       #
 #            FO, foreclosure                                                                                                        #
