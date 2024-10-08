@@ -39,22 +39,29 @@ warnings.filterwarnings('ignore', category=UserWarning)
 # The parsing class
 class FFFParser:
     def __init__(self, begin_year: int, begin_month: int, 
+                 which_tables: list = None, push_header: bool = True, 
                  end_year: Optional[int] = None, end_month: Optional[int] = None, 
-                 project_id: str, dataset_id: str):
+                 project_id: str = 'pd-deep-sat-10', dataset_id: str = 'cd_fff_sbx'):
         self.begin_year = begin_year
         self.begin_month = begin_month
         self.end_year = end_year
         self.end_month = end_month
         self.project_id = project_id
         self.dataset_id = dataset_id
-        self.fff_name = '...'
+        self.push_header = push_header
+        
+        self.fff_name = 'pd-deep-prd.equifax_eraw_SEC.equifax_retail_credit_scoring'
         self.bq_prefix = f'{self.project_id}.{self.dataset_id}'
         self.client = bigquery.Client(project=project_id)
-        self.seg_names = ['address', 'name', 'death', 'employment', 'other_income', 'bankruptcy', 'collection', 'secured_loan', 
-                          'legal_item', 'foreclosure', 'non_responsibility', 'marital_item', 'tax_lien', 'financial_counselor',
-                          'garnishment', 'trade_check', 'nonmember_trade_check', 'chequing_saving', 'foreign_bureau', 'inquries',
-                          'local_special_service', 'consumer_declaration', 'bureau_score']        
-        self.table_names = self.seg_names + ['header']
+        
+        if which_tables is None:
+            self.seg_names = ['address', 'name', 'death', 'employment', 'other_income', 'bankruptcy', 'collection', 'secured_loan', 
+                              'legal_item', 'foreclosure', 'non_responsibility', 'marital_item', 'tax_lien', 'financial_counselor',
+                              'garnishment', 'trade_check', 'nonmember_trade_check', 'chequing_saving', 'foreign_bureau', 'inquries',
+                              'local_special_service', 'consumer_declaration', 'bureau_score']  
+        else:
+            self.seg_names = which_tables
+            
         self.header_cols_dict = {
             'report_type': (0, 4),
             'customer_reference_no': (5, 17), 
@@ -84,15 +91,17 @@ class FFFParser:
             'safescan_byte_1': (317, 318),
             'safescan_is_byte_2': (318, 319)
         }
-        self.column_taboo = []
+        self.column_taboo = ['check']
 
     def fetch_data_from_google_bigquery(self):
-        fetch_query = self._construct_fetch_query(how='fetch', who='')
+        fetch_query = self._construct_fetch_query()
         query_job = self.client.query(fetch_query)    
         fetch_job = query_job.result()
         self.raw_data = fetch_job.to_dataframe()
         self.data = self.raw_data[['id', 'file_name', 'file_date', 'business_partner_id', 'file_raw_content']].copy()
         self.data = self.data[~self.data['file_raw_content'].isna()]
+        self.data['check'] = self.data.file_raw_content.apply(lambda x: 'FULL' in x)
+        self.data = self.data.loc[self.data.check]
         for col in self.header_cols_dict.keys():
             self.data[col] = None
         for seg in self.seg_names:
@@ -109,7 +118,7 @@ class FFFParser:
             push_job = self.client.load_table_from_dataframe(table, f'{self.bq_prefix}.fff_{seg_name}')
             push_job.result()
             print(f'{seg_name} table has been pushed to BigQuery @ {self.bq_prefix}')
-        
+            
     def push_tables_to_google_bigquery(self):
         self._parse_header()
         
@@ -119,38 +128,32 @@ class FFFParser:
             time.sleep(0.1)
             
         # push the header table
-        self.data.drop(columns=self.column_taboo, inplace=True)
-        self.data.reset_index(drop=True)
-        push_job = self.client.load_table_from_dataframe(self.data, f'{self.bq_prefix}.fff_header')
-        push_job.result()
-        print(f'header table has been pushed to BigQuery @ {self.bq_prefix}')
-        print('******************** Push complete ! ********************')
+        if self.push_header:
+            self.data.drop(columns=self.column_taboo, inplace=True)
+            self.data.reset_index(drop=True)
+            push_job = self.client.load_table_from_dataframe(self.data, f'{self.bq_prefix}.fff_header')
+            push_job.result()
+            print(f'header table has been pushed to BigQuery @ {self.bq_prefix}')
+         
+        if self.end_year is not None and self.end_year is not None:
+            print(f'******************** Push ({self.begin_year}.{self.begin_month} to {self.end_year}.{self.end_month}) complete ! ********************')
+        else:
+            print(f'******************** Push ({self.begin_year}.{self.begin_month}) complete ! ********************')
         
-    def _construct_fetch_query(self, how: str, who: str) -> str:
-        if how not in ['fetch', 'push']:
-            raise ValueError
-        if who not in self.table_names and who != '':
-            raise ValueError
-        if how == 'fetch':
-            if self.end_year is not None and self.end_year is not None:
-                fetch_query = f"""
-                    SELECT * FROM `{self.fff_name}`
-                    WHERE file_date >= DATE(SAFE_CAST({self.begin_year} AS INT64), SAFE_CAST({self.begin_month} AS INT64), 1) AND
-                    file_date <= LAST_DAY(DATE(SAFE_CAST({self.end_year} AS INT64), SAFE_CAST({self.end_month} AS INT64), 1))
-                """
-            else:
-                fetch_query = f"""
-                    SELECT * FROM `{self.fff_name}`
-                    WHERE file_date >= DATE(SAFE_CAST({self.begin_year} AS INT64), SAFE_CAST({self.begin_month} AS INT64), 1) AND
-                    file_date <= LAST_DAY(DATE(SAFE_CAST({self.begin_year} AS INT64), SAFE_CAST({self.begin_month} AS INT64), 1))
-                    ORDER BY business_partner_id, file_date 
-                    LIMIT 100                
-                """
-        elif how == 'push':
-            which_table = f'fff_{who}_parsed'
+    def _construct_fetch_query(self) -> str:
+        if self.end_year is not None and self.end_year is not None:
             fetch_query = f"""
-                SELECT * FROM `{self.bq_prefix}.{which_table}`
-            """ 
+                SELECT * FROM `{self.fff_name}`
+                WHERE file_date >= DATE(SAFE_CAST({self.begin_year} AS INT64), SAFE_CAST({self.begin_month} AS INT64), 1) AND
+                file_date <= LAST_DAY(DATE(SAFE_CAST({self.end_year} AS INT64), SAFE_CAST({self.end_month} AS INT64), 1))
+            """
+        else:
+            fetch_query = f"""
+                SELECT * FROM `{self.fff_name}`
+                WHERE file_date >= DATE(SAFE_CAST({self.begin_year} AS INT64), SAFE_CAST({self.begin_month} AS INT64), 1) AND
+                file_date <= LAST_DAY(DATE(SAFE_CAST({self.begin_year} AS INT64), SAFE_CAST({self.begin_month} AS INT64), 1))
+                ORDER BY business_partner_id, file_date 
+            """
         return fetch_query
     
     def _parse_entry_details(self, ncol: int) -> Tuple:
@@ -488,8 +491,8 @@ class FFFParser:
                     flag += f'{fg}, '
                 self.data.loc[ncol, 'other_income_flag'] = flag[:-2]
         self.column_taboo.append('idx_OI')
-        self.oinc['check1'] = self.oinc.date_reported.apply(lambda x: x[:2].isdigit() and x[3:].isdigit() if x.strip() else True)
-        self.oinc['check2'] = self.oinc.date_verified.apply(lambda x: x[:2].isdigit() and x[3:].isdigit() if x.strip() else True)
+        self.oinc['check1'] = self.oinc.date_reported.apply(lambda x: x[:2].isdigit() and x[3:].isdigit() if x.strip() else False)
+        self.oinc['check2'] = self.oinc.date_verified.apply(lambda x: x[:2].isdigit() and x[3:].isdigit() if x.strip() else False)
         self.oinc = self.oinc.loc[self.oinc.check1 & self.oinc.check2]
         self.oinc.drop(columns = ['check1', 'check2'], inplace=True)
         self._push_seg_table(table=self.oinc, table_len=len(self.oinc), seg_name='other_income')      
@@ -693,8 +696,10 @@ class FFFParser:
         self.column_taboo.append('idx_LI')
         self.leit['check1'] = self.leit.type_code.apply(lambda x: x in ['A', 'J', 'F'])
         self.leit['check2'] = self.leit.status_code.apply(lambda x: x in ['D', 'S', 'T'])
-        self.leit = self.leit.loc[self.leit.check1 | self.leit.check2]
-        self.leit.drop(columns = ['check1', 'check2'], inplace=True)
+        self.leit['check3'] = self.leit.amount.apply(lambda x: '\\' not in x)
+        self.leit['check4'] = self.leit.name_court.apply(lambda x: x[0] != ' ')
+        self.leit = self.leit.loc[(self.leit.check1 | self.leit.check2) & self.leit.check3 & self.leit.check4]
+        self.leit.drop(columns = ['check1', 'check2', 'check3', 'check4'], inplace=True)
         self._push_seg_table(table=self.leit, table_len=len(self.leit), seg_name='legal_item')      
     
     # 10. parsing foreclosure
@@ -732,8 +737,8 @@ class FFFParser:
                     flag += f'{fg}, '
                 self.data.loc[ncol, 'foreclosure_flag'] = flag[:-2]
         self.column_taboo.append('idx_FO')
-        self.focl['check1'] = self.focl.date_reported.apply(lambda x: x[:2].isdigit() and x[3:].isdigit() if x.strip() else True)
-        self.focl['check2'] = self.focl.date_checked.apply(lambda x: x[:2].isdigit() and x[3:].isdigit() if x.strip() else True)
+        self.focl['check1'] = self.focl.date_reported.apply(lambda x: x[:2].isdigit() and x[3:].isdigit() if x.strip() else False)
+        self.focl['check2'] = self.focl.date_checked.apply(lambda x: x[:2].isdigit() and x[3:].isdigit() if x.strip() else False)
         self.focl = self.focl.loc[self.focl.check1 | self.focl.check2]
         self.focl.drop(columns = ['check1', 'check2'], inplace=True)
         self._push_seg_table(table=self.focl, table_len=len(self.focl), seg_name='foreclosure')
@@ -772,8 +777,8 @@ class FFFParser:
                     flag += f'{fg}, '
                 self.data.loc[ncol, 'non_responsibility_flag'] = flag[:-2]
         self.column_taboo.append('idx_NR')
-        self.nres['check1'] = self.nres.date_reported.apply(lambda x: x[:2].isdigit() and x[3:].isdigit() if x.strip() else True)
-        self.nres['check2'] = self.nres.person_filling.apply(lambda x: x in ['S', 'W', 'B', ' '])
+        self.nres['check1'] = self.nres.date_reported.apply(lambda x: x[:2].isdigit() and x[3:].isdigit() if x.strip() else False)
+        self.nres['check2'] = self.nres.person_filling.apply(lambda x: x in ['S', 'W', 'B'])
         self.nres = self.nres.loc[self.nres.check1 | self.nres.check2]
         self.nres.drop(columns = ['check1', 'check2'], inplace=True)
         self._push_seg_table(table=self.nres, table_len=len(self.nres), seg_name='non_responsibility')  
@@ -915,7 +920,7 @@ class FFFParser:
         self.ficl['check1'] = self.ficl.date_reported.apply(lambda x: x[:2].isdigit() and x[3:].isdigit() if x.strip() else False)
         self.ficl['check2'] = self.ficl.date_checked.apply(lambda x: x[:2].isdigit() and x[3:].isdigit() if x.strip() else False)
         self.ficl['check3'] = self.ficl.date_settled.apply(lambda x: x[:2].isdigit() and x[3:].isdigit() if x.strip() else False)
-        self.ficl['check4'] = self.ficl.status_code.apply(lambda x: x in ['S', 'I', 'V', ' '])
+        self.ficl['check4'] = self.ficl.status_code.apply(lambda x: x in ['S', 'I', 'V'])
         self.ficl['check5'] = self.ficl.member_number.apply(lambda x: ((x.strip()[:3].isdigit() and x.strip()[3:5].isalpha() and x.strip()[5:].isdigit()) or x.strip() == ''))
         self.ficl = self.ficl.loc[self.ficl.check1 & self.ficl.check2 & self.ficl.check3 & self.ficl.check4 & self.ficl.check5]
         self.ficl.drop(columns = ['check1', 'check2', 'check3', 'check4', 'check5'], inplace=True)
@@ -1081,8 +1086,8 @@ class FFFParser:
                     flag += f'{fg}, '
                 self.data.loc[ncol, 'nonmember_trade_check_flag'] = flag[:-2]
         self.column_taboo.append('idx_NT')
-        self.ntdck['check1'] = self.ntdck.date_reported.apply(lambda x: x[:2].isdigit() and x[3:].isdigit() if x.strip() else True)
-        self.ntdck['check2'] = self.ntdck.date_opened.apply(lambda x: x[:2].isdigit() and x[3:].isdigit() if x.strip() else True)
+        self.ntdck['check1'] = self.ntdck.date_reported.apply(lambda x: x[:2].isdigit() and x[3:].isdigit() if x.strip() else False)
+        self.ntdck['check2'] = self.ntdck.date_opened.apply(lambda x: x[:2].isdigit() and x[3:].isdigit() if x.strip() else False)
         self.ntdck = self.ntdck.loc[self.ntdck.check1 & self.ntdck.check2]
         self.ntdck.drop(columns = ['check1', 'check2'], inplace=True)
         self._push_seg_table(table=self.ntdck, table_len=len(self.ntdck), seg_name='nonmember_trade_check')      
@@ -1367,7 +1372,7 @@ class FFFParser:
         self.busc['check1'] = self.busc.product_score.apply(lambda x: x.strip().isdigit() if x[0] not in ['+', '-'] else x.strip()[1:].isdigit())
         self.busc = self.busc.loc[self.busc.check1]
         self.busc.drop(columns = 'check1', inplace=True)
-        self._push_seg_table(table=self.busc, table_len=len(self.busc),  seg_name='bureau_score')    
+        self._push_seg_table(table=self.busc, table_len=len(self.busc),  seg_name='bureau_score')     
 
 
 if __name__ == '__main__':
