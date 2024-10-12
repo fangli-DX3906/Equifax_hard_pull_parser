@@ -39,8 +39,8 @@ warnings.filterwarnings('ignore', category=UserWarning)
 # The parsing class
 class FFFParser:
     def __init__(self, begin_year: int, begin_month: int, 
-                 which_tables: list = None, push_header: bool = True, 
-                 end_year: Optional[int] = None, end_month: Optional[int] = None, 
+                 end_year: Optional[int] = None, end_month: Optional[int] = None,
+                 which_tables: list = None, push_header: bool = True, debug_mode: bool=False,
                  project_id: str = 'pd-deep-sat-10', dataset_id: str = 'cd_fff_sbx'):
         self.begin_year = begin_year
         self.begin_month = begin_month
@@ -49,19 +49,29 @@ class FFFParser:
         self.project_id = project_id
         self.dataset_id = dataset_id
         self.push_header = push_header
+        self.debug_mode = debug_mode
         
         self.fff_name = 'pd-deep-prd.equifax_eraw_SEC.equifax_retail_credit_scoring'
         self.bq_prefix = f'{self.project_id}.{self.dataset_id}'
         self.client = bigquery.Client(project=project_id)
         
         if which_tables is None:
-            self.seg_names = ['address', 'name', 'death', 'employment', 'other_income', 'bankruptcy', 'collection', 'secured_loan', 
-                              'legal_item', 'foreclosure', 'non_responsibility', 'marital_item', 'tax_lien', 'financial_counselor',
-                              'garnishment', 'trade_check', 'nonmember_trade_check', 'chequing_saving', 'foreign_bureau', 'inquries',
-                              'local_special_service', 'consumer_declaration', 'bureau_score']  
+            self.seg_names = ['address', 'name', 'death', 'employment', 'other_income', 'bankruptcy', 'collection', 
+                              'secured_loan', 'legal_item', 'foreclosure', 'non_responsibility', 'marital_item', 
+                              'tax_lien', 'financial_counselor', 'garnishment', 'trade_check', 'nonmember_trade_check', 
+                              'chequing_saving', 'foreign_bureau', 'inquries', 'local_special_service', 
+                              'consumer_declaration', 'bureau_score']  
         else:
             self.seg_names = which_tables
             
+        self.error_log_info = {
+            'year': [self.begin_year, self.end_year],
+            'month': [self.begin_month, self.end_month],
+            'need_pushed': self.seg_names + ['header']  if push_header else self.seg_names,
+            'already_pushed': [], 
+            'left_pushed': self.seg_names + ['header'] if push_header else self.seg_names
+        }
+
         self.header_cols_dict = {
             'report_type': (0, 4),
             'customer_reference_no': (5, 17), 
@@ -98,15 +108,18 @@ class FFFParser:
         query_job = self.client.query(fetch_query)    
         fetch_job = query_job.result()
         self.raw_data = fetch_job.to_dataframe()
+        
         self.data = self.raw_data[['id', 'file_name', 'file_date', 'business_partner_id', 'file_raw_content']].copy()
         self.data = self.data[~self.data['file_raw_content'].isna()]
         self.data['check'] = self.data.file_raw_content.apply(lambda x: 'FULL' in x)
         self.data = self.data.loc[self.data.check]
+        
         for col in self.header_cols_dict.keys():
             self.data[col] = None
         for seg in self.seg_names:
             self.data[f'{seg}_nrecords'] = -1
             self.data[f'{seg}_flag'] = ''
+            
         if self.end_year is not None and self.end_year is not None:
             print(f'******************** FFF data ({self.begin_year}.{self.begin_month} to {self.end_year}.{self.end_month}) has been retrieved ! ********************')
         else:
@@ -115,30 +128,58 @@ class FFFParser:
     def _push_seg_table(self, table: pd.DataFrame, table_len: int, seg_name: str):
         if table_len > 0:
             table.reset_index(drop=True)
-            push_job = self.client.load_table_from_dataframe(table, f'{self.bq_prefix}.fff_{seg_name}')
-            push_job.result()
+            if not self.debug_mode:
+                push_job = self.client.load_table_from_dataframe(table, f'{self.bq_prefix}.fff_{seg_name}')
+                push_job.result()
+            else:
+                time.sleep(1)
             print(f'{seg_name} table has been pushed to BigQuery @ {self.bq_prefix}')
             
-    def push_tables_to_google_bigquery(self):
-        self._parse_header()
+    def push_tables_to_google_bigquery(self, parse_header: bool = True):
+        if parse_header:
+            self._parse_header()
         
         # push segment tables         
         for seg in self.seg_names:
             exec(f'self._parse_{seg}()', {'self': self})
+            self.error_log_info['already_pushed'].append(seg)
+            self.error_log_info['left_pushed'].remove(seg)
             time.sleep(0.1)
             
         # push the header table
         if self.push_header:
             self.data.drop(columns=self.column_taboo, inplace=True)
             self.data.reset_index(drop=True)
-            push_job = self.client.load_table_from_dataframe(self.data, f'{self.bq_prefix}.fff_header')
-            push_job.result()
+            if not self.debug_mode:
+                push_job = self.client.load_table_from_dataframe(self.data, f'{self.bq_prefix}.fff_header')
+                push_job.result()
+            else:
+                time.sleep(1)
+            self.error_log_info['already_pushed'].append('header')
+            self.error_log_info['left_pushed'].remove('header')
             print(f'header table has been pushed to BigQuery @ {self.bq_prefix}')
          
         if self.end_year is not None and self.end_year is not None:
             print(f'******************** Push ({self.begin_year}.{self.begin_month} to {self.end_year}.{self.end_month}) complete ! ********************')
         else:
             print(f'******************** Push ({self.begin_year}.{self.begin_month}) complete ! ********************')
+            
+    def restart_from_break(self):
+        if len(self.error_log_info['left_pushed']) == 0:
+            print('Already complete!')
+            return 
+        
+        self.seg_names = self.error_log_info['left_pushed'].copy()
+        if 'header' in self.error_log_info['left_pushed']:
+            self.seg_names.remove('header')
+            self.push_header = True
+        else:
+            self.push_header = False
+            
+        if 'mfile' in list(self.data.columns):
+            self.push_tables_to_google_bigquery(parse_header=False)
+        else:
+            self.push_tables_to_google_bigquery()
         
     def _construct_fetch_query(self) -> str:
         if self.end_year is not None and self.end_year is not None:
@@ -154,6 +195,10 @@ class FFFParser:
                 file_date <= LAST_DAY(DATE(SAFE_CAST({self.begin_year} AS INT64), SAFE_CAST({self.begin_month} AS INT64), 1))
                 ORDER BY business_partner_id, file_date 
             """
+            
+        if self.debug_mode:
+            fetch_query += 'LIMIT 20'
+            
         return fetch_query
     
     def _parse_entry_details(self, ncol: int) -> Tuple:
@@ -1372,7 +1417,7 @@ class FFFParser:
         self.busc['check1'] = self.busc.product_score.apply(lambda x: x.strip().isdigit() if x[0] not in ['+', '-'] else x.strip()[1:].isdigit())
         self.busc = self.busc.loc[self.busc.check1]
         self.busc.drop(columns = 'check1', inplace=True)
-        self._push_seg_table(table=self.busc, table_len=len(self.busc),  seg_name='bureau_score')     
+        self._push_seg_table(table=self.busc, table_len=len(self.busc),  seg_name='bureau_score') 
 
 
 if __name__ == '__main__':
@@ -1394,6 +1439,6 @@ if __name__ == '__main__':
     SELECT a.id, a.file_date, a.file_name, b.*
     FROM `....fff_header` AS a
     LEFT JOIN `....fff_address` AS b
-    ON b.match_flag IN UNNEST(SPLIT(a.address_flag, ', '))
+    ON a.business_partner_id = b.bus_ptnr AND a.file_date = b.file_date
     ORDER BY id, a.file_date 
     '''
